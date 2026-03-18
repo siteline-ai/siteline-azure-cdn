@@ -5,8 +5,7 @@ import tsPlugin from '@typescript-eslint/eslint-plugin';
 import tsParser from '@typescript-eslint/parser';
 import prettierConfig from 'eslint-config-prettier';
 
-const configDirectory = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(configDirectory, '..');
+const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
 export default [
   {

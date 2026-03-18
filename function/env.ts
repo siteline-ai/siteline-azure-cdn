@@ -1,7 +1,3 @@
-import { config as loadDotEnv } from 'dotenv';
-
-loadDotEnv();
-
 export interface SitelineSettings {
   websiteKey?: string;
   endpoint?: string;

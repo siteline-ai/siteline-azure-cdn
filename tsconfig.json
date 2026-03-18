@@ -19,6 +19,6 @@
     "outDir": "dist",
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "config/**/*.ts", "test/**/*.ts", "vitest.config.ts"],
+  "include": ["function/**/*.ts", "wizard/**/*.ts", "*.config.ts"],
   "exclude": ["dist", "node_modules"]
 }

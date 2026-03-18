@@ -1,6 +1,6 @@
 import { type EventGridEvent, app } from '@azure/functions';
 import { DefaultAzureCredential } from '@azure/identity';
-import { BlobClient, BlobServiceClient } from '@azure/storage-blob';
+import { BlobClient } from '@azure/storage-blob';
 import { Siteline, type PageviewData, type SitelineConfig } from '@siteline/core';
 import { gunzipSync } from 'node:zlib';
 
@@ -8,13 +8,17 @@ import {
   DEFAULT_INTEGRATION_TYPE,
   DEFAULT_SDK_NAME,
   DEFAULT_SDK_VERSION
-} from '../config/constants';
-import { appConfig } from '../config/env';
+} from './constants.js';
+import { appConfig } from './env.js';
 
 type JsonRecord = Record<string, unknown>;
 
 const GZIP_MAGIC_BYTE_1 = 0x1f;
 const GZIP_MAGIC_BYTE_2 = 0x8b;
+
+const MAX_CONCURRENCY = 10;
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 1000;
 
 const logTrackingError = (message: string, error: unknown): void => {
   const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -25,6 +29,63 @@ const logTrackingError = (message: string, error: unknown): void => {
       errorMessage
     })
   );
+};
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+const trackWithRetry = async (client: Siteline, pageview: PageviewData): Promise<boolean> => {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await client.track(pageview);
+      return true;
+    } catch (error: unknown) {
+      if (attempt === MAX_RETRIES) {
+        logTrackingError('Failed to send pageview after retries; record dropped.', error);
+        return false;
+      }
+
+      const delayMs = BASE_DELAY_MS * 2 ** attempt;
+      await sleep(delayMs);
+    }
+  }
+
+  return false;
+};
+
+const processWithConcurrencyLimit = async (
+  client: Siteline,
+  pageviews: readonly PageviewData[]
+): Promise<{ sent: number; failed: number }> => {
+  let sent = 0;
+  let failed = 0;
+  let index = 0;
+
+  const worker = async (): Promise<void> => {
+    while (index < pageviews.length) {
+      const current = index;
+      index++;
+
+      const pageview = pageviews[current];
+      if (!pageview) {
+        continue;
+      }
+
+      const ok = await trackWithRetry(client, pageview);
+      if (ok) {
+        sent++;
+      } else {
+        failed++;
+      }
+    }
+  };
+
+  const workers = Array.from(
+    { length: Math.min(MAX_CONCURRENCY, pageviews.length) },
+    () => worker()
+  );
+
+  await Promise.all(workers);
+  return { sent, failed };
 };
 
 const createSitelineClient = (): Siteline | undefined => {
@@ -274,30 +335,8 @@ const parseBlobUrl = (blobUrl: string): URL => {
   }
 };
 
-const getBlobNameFromPath = (pathName: string): { containerName: string; blobName: string } => {
-  const normalized = pathName.startsWith('/') ? pathName.slice(1) : pathName;
-  const firstSlashIndex = normalized.indexOf('/');
-  if (firstSlashIndex <= 0 || firstSlashIndex >= normalized.length - 1) {
-    throw new Error('Event Grid payload blob URL does not include container/blob path.');
-  }
-
-  const containerName = normalized.slice(0, firstSlashIndex);
-  const blobName = normalized.slice(firstSlashIndex + 1);
-  return {
-    containerName,
-    blobName
-  };
-};
-
 const buildBlobClient = (blobUrl: URL): BlobClient => {
-  const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING?.trim();
-  if (!connectionString) {
-    return new BlobClient(blobUrl.toString(), new DefaultAzureCredential());
-  }
-
-  const { containerName, blobName } = getBlobNameFromPath(blobUrl.pathname);
-  const blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
-  return blobServiceClient.getContainerClient(containerName).getBlobClient(blobName);
+  return new BlobClient(blobUrl.toString(), new DefaultAzureCredential());
 };
 
 const getBlobBuffer = async (blobUrl: string): Promise<Buffer> => {
@@ -362,22 +401,36 @@ export const handler = async (event: EventGridEvent): Promise<void> => {
   const rawLog = await getRawLog(blobUrl);
   const records = parseRecords(rawLog);
 
-  const trackPromises: Promise<void>[] = [];
+  const pageviews: PageviewData[] = [];
+  let skipped = 0;
 
   for (const record of records) {
     try {
       const pageview = toPageviewData(record);
       if (!pageview) {
+        skipped++;
         continue;
       }
 
-      trackPromises.push(siteline.track(pageview));
+      pageviews.push(pageview);
     } catch (error: unknown) {
+      skipped++;
       logTrackingError('Failed to parse Azure CDN log row; row skipped.', error);
     }
   }
 
-  await Promise.all(trackPromises);
+  const { sent, failed } = await processWithConcurrencyLimit(siteline, pageviews);
+
+  console.log(
+    JSON.stringify({
+      service: appConfig.appName,
+      message: 'Blob processed.',
+      total: records.length,
+      sent,
+      skipped,
+      failed
+    })
+  );
 };
 
 app.eventGrid('blob-log-processor', {

@@ -26,7 +26,7 @@ const azureFunctionsMocks = vi.hoisted(() => {
 });
 
 const sitelineMocks = vi.hoisted(() => {
-  const track = vi.fn<(data: unknown) => void>();
+  const track = vi.fn<(data: unknown) => Promise<void>>();
   const Siteline = vi.fn().mockImplementation(function SitelineMock() {
     return {
       track
@@ -97,7 +97,7 @@ const setBlobBody = (rawLog: string, gzip = false): void => {
 };
 
 const loadHandler = async (): Promise<(event: EventGridEvent) => Promise<void>> => {
-  const module = await import('../src/handlers/blob-log-processor.js');
+  const module = await import('../blob-log-processor.js');
   return module.handler as (event: EventGridEvent) => Promise<void>;
 };
 
@@ -280,5 +280,89 @@ describe('blob-log-processor handler', () => {
 
     await expect(handler(createEvent())).rejects.toThrow('blob unavailable');
     expect(sitelineMocks.track).not.toHaveBeenCalled();
+  });
+
+  it('uses only DefaultAzureCredential for blob access', async () => {
+    setBlobBody(
+      JSON.stringify({
+        records: [
+          {
+            properties: {
+              requestUri: 'https://cdn.example.com/page',
+              statusCode: 200,
+              method: 'GET'
+            }
+          }
+        ]
+      })
+    );
+
+    const handler = await loadHandler();
+    await handler(createEvent());
+
+    expect(azureIdentityMocks.DefaultAzureCredential).toHaveBeenCalledTimes(1);
+    expect(azureStorageMocks.BlobClient).toHaveBeenCalledWith(
+      'https://sitelineazurecdnlogs.blob.core.windows.net/cdn-logs/insights-logs-coreanalytics/log.json.gz',
+      expect.any(Object)
+    );
+  });
+
+  it('retries transient Siteline API failures and continues processing', async () => {
+    sitelineMocks.track
+      .mockRejectedValueOnce(new Error('network timeout'))
+      .mockRejectedValueOnce(new Error('network timeout'))
+      .mockResolvedValueOnce(undefined);
+
+    setBlobBody(
+      JSON.stringify({
+        records: [
+          {
+            properties: {
+              requestUri: 'https://cdn.example.com/page',
+              statusCode: 200,
+              method: 'GET'
+            }
+          }
+        ]
+      })
+    );
+
+    const handler = await loadHandler();
+    await handler(createEvent());
+
+    expect(sitelineMocks.track).toHaveBeenCalledTimes(3);
+  });
+
+  it('caps concurrent Siteline API calls', async () => {
+    let concurrentCalls = 0;
+    let maxConcurrentCalls = 0;
+
+    sitelineMocks.track.mockImplementation(() => {
+      concurrentCalls++;
+      maxConcurrentCalls = Math.max(maxConcurrentCalls, concurrentCalls);
+      return new Promise<void>((resolve) => {
+        setTimeout(() => {
+          concurrentCalls--;
+          resolve();
+        }, 10);
+      });
+    });
+
+    const records = Array.from({ length: 30 }, (_, i) => ({
+      properties: {
+        requestUri: `https://cdn.example.com/page-${String(i)}`,
+        statusCode: 200,
+        method: 'GET'
+      }
+    }));
+
+    setBlobBody(JSON.stringify({ records }));
+
+    const handler = await loadHandler();
+    await handler(createEvent());
+
+    expect(sitelineMocks.track).toHaveBeenCalledTimes(30);
+    expect(maxConcurrentCalls).toBeLessThanOrEqual(10);
+    expect(maxConcurrentCalls).toBeGreaterThan(1);
   });
 });
