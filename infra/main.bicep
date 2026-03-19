@@ -80,6 +80,65 @@ resource dlqContainer 'Microsoft.Storage/storageAccounts/blobServices/containers
 }
 
 // ---------------------------------------------------------------------------
+// Lifecycle Policy — auto-delete processed log blobs after 7 days
+// ---------------------------------------------------------------------------
+
+resource lifecyclePolicy 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = {
+  parent: storageAccount
+  name: 'default'
+  properties: {
+    policy: {
+      rules: [
+        {
+          name: 'delete-old-cdn-logs'
+          enabled: true
+          type: 'Lifecycle'
+          definition: {
+            filters: {
+              blobTypes: [
+                'blockBlob'
+              ]
+              prefixMatch: [
+                '${logContainerName}/'
+              ]
+            }
+            actions: {
+              baseBlob: {
+                delete: {
+                  daysAfterModificationGreaterThan: 7
+                }
+              }
+            }
+          }
+        }
+        {
+          name: 'delete-old-dlq-events'
+          enabled: true
+          type: 'Lifecycle'
+          definition: {
+            filters: {
+              blobTypes: [
+                'blockBlob'
+              ]
+              prefixMatch: [
+                '${dlqContainerName}/'
+              ]
+            }
+            actions: {
+              baseBlob: {
+                delete: {
+                  daysAfterModificationGreaterThan: 30
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Function App (Consumption Plan, Linux, Node 20)
 // ---------------------------------------------------------------------------
 
