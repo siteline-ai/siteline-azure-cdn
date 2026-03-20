@@ -246,8 +246,18 @@ resource eventSubscription 'Microsoft.EventGrid/eventSubscriptions@2024-06-01-pr
 // CDN / Front Door Diagnostic Settings — export logs to Blob Storage
 // ---------------------------------------------------------------------------
 
+var cdnProfileSubscriptionId = split(cdnProfileResourceId, '/')[2]
+var cdnProfileResourceGroupName = split(cdnProfileResourceId, '/')[4]
+var cdnProfileName = split(cdnProfileResourceId, '/')[8]
+
+resource cdnProfileRg 'Microsoft.Resources/resourceGroups@2023-07-01' existing = {
+  name: cdnProfileResourceGroupName
+  scope: subscription(cdnProfileSubscriptionId)
+}
+
 resource cdnProfile 'Microsoft.Cdn/profiles@2024-02-01' existing = {
-  name: split(cdnProfileResourceId, '/')[8]
+  name: cdnProfileName
+  scope: cdnProfileRg
 }
 
 resource cdnDiagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {

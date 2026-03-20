@@ -394,6 +394,14 @@ const getBlobUrl = (event: EventGridEvent): string => {
 
 export const handler = async (event: EventGridEvent): Promise<void> => {
   if (!siteline) {
+    console.warn(
+      JSON.stringify({
+        service: appConfig.appName,
+        level: 'warn',
+        message:
+          'SITELINE_WEBSITE_KEY is not configured — skipping blob processing. Set the app setting to enable log forwarding.'
+      })
+    );
     return;
   }
 
